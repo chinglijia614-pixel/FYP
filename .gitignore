@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local logs
+*.log
+
+# Excel temp lock files
+~$*.xlsx
+
+# Local model/cache artifacts
+*.pkl
+3. Prototype/cache/
+
+# Generated reports
+0. Data Preparation/output/
+1. Kaggle_Training/output/
+2. External_Validation/output/
+
+# Large prepared datasets
+0. Data Preparation/input/
+1. Kaggle_Training/input/
+2. External_Validation/input/symbipredict_2022.csv
+2. External_Validation/input/ddxplus/*.zip
+
+# Keep DDXPlus metadata JSONs tracked
+!2. External_Validation/input/ddxplus/release_conditions.json
+!2. External_Validation/input/ddxplus/release_evidences.json
