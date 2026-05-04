@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 # =============================================================================
@@ -19,17 +19,19 @@ from sklearn.preprocessing import LabelEncoder
 # =============================================================================
 # Kaggle-only XGBoost tuning script.
 #
-# This file does NOT change the prepared dataset and does NOT use external
-# validation data. It only uses the existing files produced by:
-#   0. Data Preparation/01_prepare_kaggle_data.py
+# This version is designed for a large Kaggle-only dataset where one full
+# XGBoost train/test run can take many hours.
 #
-# Workflow:
-#   1. Load prepared Kaggle-only train / test / CV files.
-#   2. Evaluate several XGBoost parameter candidates using CV on X_cv/y_cv.
-#   3. Select the candidate with the best CV top-1 accuracy.
-#   4. Train the best candidate on the full Kaggle training split.
-#   5. Evaluate once on the Kaggle holdout test split.
-#   6. Save a tuning workbook and tuned model artifact.
+# Default behaviour is FAST SCREENING:
+#   1. Load the existing prepared Kaggle files.
+#   2. Take a stratified screening sample from X_cv/y_cv.
+#   3. Split that screening sample once into train/validation.
+#   4. Compare candidate parameter sets on the smaller screening split.
+#   5. Save the screening report and print the best candidate.
+#
+# It does NOT touch X_test by default.
+# To do the expensive final full training + X_test evaluation, add:
+#   --run_final_train
 # =============================================================================
 
 RANDOM_STATE = 42
@@ -46,8 +48,6 @@ TUNING_WORKBOOK_PATH = OUTPUT_DIR / "xgboost_kaggle_only_tuning_report.xlsx"
 TUNED_MODEL_PATH = ARTIFACTS_DIR / "xgboost_model_tuned.pkl"
 TUNED_PARAMS_PATH = ARTIFACTS_DIR / "xgboost_tuned_params.json"
 
-# Candidate order matters. The first candidate is the current baseline from
-# 02_train_xgboost.py so the report can compare improvement directly.
 CANDIDATES: list[dict[str, Any]] = [
     {
         "candidate": "baseline_current",
@@ -132,7 +132,6 @@ def multiclass_ece(y_true: np.ndarray, y_proba: np.ndarray, n_bins: int = 10) ->
     confidences = np.max(y_proba, axis=1)
     predictions = np.argmax(y_proba, axis=1)
     accuracies = (predictions == y_true).astype(float)
-
     bins = np.linspace(0.0, 1.0, n_bins + 1)
     ece = 0.0
     n = len(y_true)
@@ -143,10 +142,8 @@ def multiclass_ece(y_true: np.ndarray, y_proba: np.ndarray, n_bins: int = 10) ->
             mask = (confidences >= lo) & (confidences <= hi)
         else:
             mask = (confidences >= lo) & (confidences < hi)
-
         if not np.any(mask):
             continue
-
         bin_acc = accuracies[mask].mean()
         bin_conf = confidences[mask].mean()
         ece += (mask.sum() / n) * abs(bin_acc - bin_conf)
@@ -228,99 +225,119 @@ def candidate_to_xgb_params(candidate: dict[str, Any], num_classes: int, n_jobs:
     }
 
 
-def get_safe_cv_folds(y: np.ndarray, requested_folds: int) -> tuple[int, int]:
-    min_class_count = int(pd.Series(y).value_counts().min())
-    safe_folds = max(2, min(requested_folds, min_class_count))
-    return safe_folds, min_class_count
+def select_candidates(candidate_limit: int, candidate_name: str | None) -> list[dict[str, Any]]:
+    if candidate_name:
+        selected = [c for c in CANDIDATES if c["candidate"] == candidate_name]
+        if not selected:
+            available = ", ".join(c["candidate"] for c in CANDIDATES)
+            raise ValueError(f"Unknown candidate_name={candidate_name}. Available: {available}")
+        return selected
+    return CANDIDATES if candidate_limit == 0 else CANDIDATES[:candidate_limit]
 
 
-def evaluate_candidate_cv(
-    candidate: dict[str, Any],
+def make_screening_pool(
     X_cv: pd.DataFrame,
     y_cv: np.ndarray,
-    cv_folds: int,
-    n_jobs: int,
-) -> list[dict[str, Any]]:
-    safe_folds, min_class_count = get_safe_cv_folds(y_cv, cv_folds)
-    skf = StratifiedKFold(n_splits=safe_folds, shuffle=True, random_state=RANDOM_STATE)
-    rows: list[dict[str, Any]] = []
+    screening_rows: int,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    if screening_rows <= 0 or screening_rows >= len(X_cv):
+        print(f"Using full X_cv for screening: {len(X_cv):,} rows")
+        return X_cv.reset_index(drop=True), y_cv
 
+    if screening_rows < len(np.unique(y_cv)) * 2:
+        raise ValueError(
+            "screening_rows is too small for the number of classes. "
+            f"Use at least {len(np.unique(y_cv)) * 2} rows."
+        )
+
+    all_idx = np.arange(len(y_cv))
+    sample_idx, _ = train_test_split(
+        all_idx,
+        train_size=screening_rows,
+        stratify=y_cv,
+        random_state=RANDOM_STATE,
+    )
+    sample_idx = np.sort(sample_idx)
+    X_pool = X_cv.iloc[sample_idx].reset_index(drop=True)
+    y_pool = y_cv[sample_idx]
+    print(f"Using stratified screening pool: {len(X_pool):,} rows from X_cv")
+    return X_pool, y_pool
+
+
+def make_screening_split(
+    X_pool: pd.DataFrame,
+    y_pool: np.ndarray,
+    validation_size: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
+    idx = np.arange(len(y_pool))
+    train_idx, val_idx = train_test_split(
+        idx,
+        test_size=validation_size,
+        stratify=y_pool,
+        random_state=RANDOM_STATE,
+    )
+    return (
+        X_pool.iloc[train_idx].reset_index(drop=True),
+        X_pool.iloc[val_idx].reset_index(drop=True),
+        y_pool[train_idx],
+        y_pool[val_idx],
+    )
+
+
+def evaluate_candidate_screening(
+    candidate: dict[str, Any],
+    X_screen_train: pd.DataFrame,
+    y_screen_train: np.ndarray,
+    X_screen_val: pd.DataFrame,
+    y_screen_val: np.ndarray,
+    n_jobs: int,
+) -> dict[str, Any]:
+    start = time.perf_counter()
     print("=" * 72)
-    print(f"Candidate: {candidate['candidate']}")
-    print(f"CV folds used: {safe_folds} (requested={cv_folds}, min_class_count={min_class_count})")
+    print(f"Screening candidate: {candidate['candidate']}")
     print(json.dumps(candidate, indent=2))
     print("=" * 72)
 
-    for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X_cv, y_cv), start=1):
-        fold_start = time.perf_counter()
+    local_encoder = LabelEncoder()
+    y_train_local = local_encoder.fit_transform(y_screen_train)
+    y_val_local = local_encoder.transform(y_screen_val)
 
-        X_train_fold = X_cv.iloc[train_idx]
-        y_train_fold = y_cv[train_idx]
-        X_val_fold = X_cv.iloc[val_idx]
-        y_val_fold = y_cv[val_idx]
-
-        # XGBoost fold training is safer with contiguous local label IDs.
-        fold_encoder = LabelEncoder()
-        y_train_local = fold_encoder.fit_transform(y_train_fold)
-        y_val_local = fold_encoder.transform(y_val_fold)
-
-        model = xgb.XGBClassifier(
-            **candidate_to_xgb_params(
-                candidate,
-                num_classes=len(fold_encoder.classes_),
-                n_jobs=n_jobs,
-            )
+    model = xgb.XGBClassifier(
+        **candidate_to_xgb_params(
+            candidate,
+            num_classes=len(local_encoder.classes_),
+            n_jobs=n_jobs,
         )
-        model.fit(X_train_fold, y_train_local)
-
-        y_pred = model.predict(X_val_fold)
-        y_proba = model.predict_proba(X_val_fold)
-        metrics = calculate_metrics(y_val_local, y_pred, y_proba)
-
-        row = {
-            "candidate": candidate["candidate"],
-            "fold": fold_idx,
-            "cv_folds_used": safe_folds,
-            "min_class_count_in_cv": min_class_count,
-            **{k: candidate[k] for k in candidate if k != "candidate"},
-            **metrics,
-            "fit_eval_seconds": round(time.perf_counter() - fold_start, 2),
-        }
-        rows.append(row)
-
-        print(
-            f"Fold {fold_idx}: "
-            f"Top-1={metrics['top1_accuracy']:.4f}, "
-            f"Top-3={metrics['top3_accuracy']:.4f}, "
-            f"Macro-F1={metrics['macro_f1']:.4f}, "
-            f"ECE={metrics['ece']:.4f}, "
-            f"Time={row['fit_eval_seconds']:.2f}s"
-        )
-
-    return rows
-
-
-def summarise_cv_results(cv_results: pd.DataFrame) -> pd.DataFrame:
-    summary = (
-        cv_results.groupby("candidate", as_index=False)
-        .agg(
-            cv_top1_mean=("top1_accuracy", "mean"),
-            cv_top1_std=("top1_accuracy", "std"),
-            cv_top3_mean=("top3_accuracy", "mean"),
-            cv_top3_std=("top3_accuracy", "std"),
-            cv_macro_f1_mean=("macro_f1", "mean"),
-            cv_macro_f1_std=("macro_f1", "std"),
-            cv_ece_mean=("ece", "mean"),
-            cv_ece_std=("ece", "std"),
-            avg_fit_eval_seconds=("fit_eval_seconds", "mean"),
-        )
-        .sort_values(
-            ["cv_top1_mean", "cv_macro_f1_mean", "cv_top3_mean"],
-            ascending=[False, False, False],
-        )
-        .reset_index(drop=True)
     )
-    return summary
+    model.fit(X_screen_train, y_train_local)
+
+    y_pred = model.predict(X_screen_val)
+    y_proba = model.predict_proba(X_screen_val)
+    metrics = calculate_metrics(y_val_local, y_pred, y_proba)
+
+    row = {
+        "candidate": candidate["candidate"],
+        **{k: candidate[k] for k in candidate if k != "candidate"},
+        **metrics,
+        "screening_seconds": round(time.perf_counter() - start, 2),
+    }
+
+    print(
+        f"Screening result -> "
+        f"Top-1={metrics['top1_accuracy']:.4f}, "
+        f"Top-3={metrics['top3_accuracy']:.4f}, "
+        f"Macro-F1={metrics['macro_f1']:.4f}, "
+        f"ECE={metrics['ece']:.4f}, "
+        f"Time={row['screening_seconds']:.2f}s"
+    )
+    return row
+
+
+def summarise_screening_results(results_df: pd.DataFrame) -> pd.DataFrame:
+    return results_df.sort_values(
+        ["top1_accuracy", "macro_f1", "top3_accuracy"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
 
 
 def train_best_and_evaluate_holdout(
@@ -334,7 +351,7 @@ def train_best_and_evaluate_holdout(
 ) -> tuple[pd.DataFrame, Any]:
     start = time.perf_counter()
     print("=" * 72)
-    print("Training best candidate on full Kaggle training split")
+    print("FINAL FULL TRAINING on X_train, then one-time X_test evaluation")
     print(json.dumps(best_candidate, indent=2))
     print("=" * 72)
 
@@ -354,15 +371,15 @@ def train_best_and_evaluate_holdout(
     holdout_df = pd.DataFrame([
         {
             "candidate": best_candidate["candidate"],
-            "split": "kaggle_holdout_test_once_after_cv_selection",
+            "split": "kaggle_holdout_test_once_after_screening_selection",
             **{k: best_candidate[k] for k in best_candidate if k != "candidate"},
             **metrics,
-            "train_eval_seconds": round(time.perf_counter() - start, 2),
+            "full_train_eval_seconds": round(time.perf_counter() - start, 2),
         }
     ])
 
     print(
-        f"Holdout result -> "
+        f"Final holdout result -> "
         f"Top-1={metrics['top1_accuracy']:.4f}, "
         f"Top-3={metrics['top3_accuracy']:.4f}, "
         f"Macro-F1={metrics['macro_f1']:.4f}, "
@@ -372,25 +389,20 @@ def train_best_and_evaluate_holdout(
 
 
 def save_report(
-    cv_results: pd.DataFrame,
-    cv_summary: pd.DataFrame,
+    screening_results: pd.DataFrame,
+    screening_summary: pd.DataFrame,
     holdout_df: pd.DataFrame,
     best_candidate: dict[str, Any],
+    notes: list[str],
 ) -> None:
     params_df = pd.DataFrame([best_candidate])
-    notes_df = pd.DataFrame([
-        {
-            "note": "This report is Kaggle-only. Candidate selection used CV on X_cv/y_cv. Holdout test was evaluated once after selecting the best CV candidate."
-        },
-        {
-            "note": "The tuned model is saved as Artifacts_kaggle/xgboost_model_tuned.pkl and does not overwrite xgboost_model.pkl."
-        },
-    ])
+    notes_df = pd.DataFrame({"note": notes})
 
     with pd.ExcelWriter(TUNING_WORKBOOK_PATH, engine="openpyxl") as writer:
-        cv_summary.to_excel(writer, sheet_name="cv_summary", index=False)
-        cv_results.to_excel(writer, sheet_name="cv_fold_results", index=False)
-        holdout_df.to_excel(writer, sheet_name="holdout_result", index=False)
+        screening_summary.to_excel(writer, sheet_name="screening_summary", index=False)
+        screening_results.to_excel(writer, sheet_name="screening_results", index=False)
+        if not holdout_df.empty:
+            holdout_df.to_excel(writer, sheet_name="final_holdout_result", index=False)
         params_df.to_excel(writer, sheet_name="best_params", index=False)
         notes_df.to_excel(writer, sheet_name="notes", index=False)
 
@@ -422,18 +434,35 @@ def print_recommended_function(best_candidate: dict[str, Any]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Tune Kaggle-only XGBoost candidates.")
+    parser = argparse.ArgumentParser(description="Fast Kaggle-only XGBoost parameter screening.")
     parser.add_argument(
         "--candidate_limit",
         type=int,
         default=4,
-        help="Number of candidates to run from the ordered candidate list. Use 0 to run all candidates. Default: 4.",
+        help="Number of candidates to screen from the ordered list. Use 0 to screen all. Default: 4.",
     )
     parser.add_argument(
-        "--cv_folds",
+        "--candidate_name",
+        type=str,
+        default=None,
+        help="Run only one candidate by name, e.g. balanced_600_d6_lr004.",
+    )
+    parser.add_argument(
+        "--screening_rows",
         type=int,
-        default=2,
-        help="Requested StratifiedKFold count for candidate selection. Default: 2 for speed.",
+        default=40000,
+        help="Rows sampled from X_cv/y_cv for fast screening. Use 0 for full X_cv. Default: 40000.",
+    )
+    parser.add_argument(
+        "--validation_size",
+        type=float,
+        default=0.2,
+        help="Validation fraction inside the screening pool. Default: 0.2.",
+    )
+    parser.add_argument(
+        "--run_final_train",
+        action="store_true",
+        help="After screening, train the selected best candidate on full X_train and evaluate X_test once.",
     )
     parser.add_argument(
         "--n_jobs",
@@ -452,7 +481,7 @@ def main() -> None:
     class_names = label_encoder.classes_
 
     print("=" * 72)
-    print("KAGGLE-ONLY XGBOOST TUNING")
+    print("FAST KAGGLE-ONLY XGBOOST PARAMETER SCREENING")
     print("=" * 72)
     print(f"Train rows: {len(X_train):,}")
     print(f"Test rows: {len(X_test):,}")
@@ -460,55 +489,79 @@ def main() -> None:
     print(f"Features: {len(feature_names):,}")
     print(f"Classes: {len(class_names):,}")
     print(f"candidate_limit: {args.candidate_limit}")
-    print(f"cv_folds requested: {args.cv_folds}")
+    print(f"candidate_name: {args.candidate_name}")
+    print(f"screening_rows: {args.screening_rows}")
+    print(f"validation_size: {args.validation_size}")
+    print(f"run_final_train: {args.run_final_train}")
     print(f"n_jobs: {args.n_jobs}")
 
-    candidates = CANDIDATES if args.candidate_limit == 0 else CANDIDATES[: args.candidate_limit]
-    all_rows: list[dict[str, Any]] = []
+    candidates = select_candidates(args.candidate_limit, args.candidate_name)
+    X_pool, y_pool = make_screening_pool(X_cv, y_cv, args.screening_rows)
+    X_screen_train, X_screen_val, y_screen_train, y_screen_val = make_screening_split(
+        X_pool,
+        y_pool,
+        args.validation_size,
+    )
+    print(f"Screening train rows: {len(X_screen_train):,}")
+    print(f"Screening validation rows: {len(X_screen_val):,}")
 
+    rows = []
     for candidate in candidates:
-        candidate_rows = evaluate_candidate_cv(
-            candidate=candidate,
-            X_cv=X_cv,
-            y_cv=y_cv,
-            cv_folds=args.cv_folds,
-            n_jobs=args.n_jobs,
+        rows.append(
+            evaluate_candidate_screening(
+                candidate=candidate,
+                X_screen_train=X_screen_train,
+                y_screen_train=y_screen_train,
+                X_screen_val=X_screen_val,
+                y_screen_val=y_screen_val,
+                n_jobs=args.n_jobs,
+            )
         )
-        all_rows.extend(candidate_rows)
 
-    cv_results = pd.DataFrame(all_rows)
-    cv_summary = summarise_cv_results(cv_results)
+    screening_results = pd.DataFrame(rows)
+    screening_summary = summarise_screening_results(screening_results)
 
     print("\n" + "=" * 72)
-    print("CV SUMMARY SORTED BY TOP-1")
+    print("SCREENING SUMMARY SORTED BY TOP-1")
     print("=" * 72)
-    print(cv_summary.to_string(index=False))
+    print(screening_summary.to_string(index=False))
 
-    best_name = str(cv_summary.iloc[0]["candidate"])
+    best_name = str(screening_summary.iloc[0]["candidate"])
     best_candidate = next(c for c in candidates if c["candidate"] == best_name)
-
-    holdout_df, tuned_model = train_best_and_evaluate_holdout(
-        best_candidate=best_candidate,
-        X_train=X_train,
-        y_train=y_train,
-        X_test=X_test,
-        y_test=y_test,
-        class_names=class_names,
-        n_jobs=args.n_jobs,
-    )
-
-    joblib.dump(tuned_model, TUNED_MODEL_PATH)
     TUNED_PARAMS_PATH.write_text(json.dumps(best_candidate, indent=2), encoding="utf-8")
 
+    holdout_df = pd.DataFrame()
+    if args.run_final_train:
+        holdout_df, tuned_model = train_best_and_evaluate_holdout(
+            best_candidate=best_candidate,
+            X_train=X_train,
+            y_train=y_train,
+            X_test=X_test,
+            y_test=y_test,
+            class_names=class_names,
+            n_jobs=args.n_jobs,
+        )
+        joblib.dump(tuned_model, TUNED_MODEL_PATH)
+        print(f"Saved tuned model: {TUNED_MODEL_PATH}")
+    else:
+        print("\nFinal full training was skipped.")
+        print("Add --run_final_train only when you are ready to spend one full training run on the selected candidate.")
+
+    notes = [
+        "Default mode is fast screening only. It does not evaluate X_test unless --run_final_train is used.",
+        "screening_summary is for parameter selection only and should not be reported as final test accuracy.",
+        "Final reportable Kaggle holdout accuracy is only in final_holdout_result when --run_final_train is used.",
+        "The tuned params JSON is saved even when final full training is skipped.",
+    ]
     save_report(
-        cv_results=cv_results,
-        cv_summary=cv_summary,
+        screening_results=screening_results,
+        screening_summary=screening_summary,
         holdout_df=holdout_df,
         best_candidate=best_candidate,
+        notes=notes,
     )
 
-    print(f"Saved tuned model: {TUNED_MODEL_PATH}")
-    print(f"Saved tuned params JSON: {TUNED_PARAMS_PATH}")
+    print(f"Saved best params JSON: {TUNED_PARAMS_PATH}")
     print_recommended_function(best_candidate)
     timer("total_script", script_start)
 
