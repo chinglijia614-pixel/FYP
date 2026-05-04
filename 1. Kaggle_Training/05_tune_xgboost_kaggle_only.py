@@ -11,7 +11,6 @@ import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.metrics import accuracy_score, f1_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
 # =============================================================================
@@ -24,8 +23,9 @@ from sklearn.preprocessing import LabelEncoder
 #
 # Default behaviour is FAST SCREENING:
 #   1. Load the existing prepared Kaggle files.
-#   2. Take a stratified screening sample from X_cv/y_cv.
-#   3. Split that screening sample once into train/validation.
+#   2. Take a class-safe screening sample from X_cv/y_cv.
+#   3. Split that screening sample into train/validation while keeping at least
+#      one sample per disease class in both screening train and validation.
 #   4. Compare candidate parameter sets on the smaller screening split.
 #   5. Save the screening report and print the best candidate.
 #
@@ -244,23 +244,48 @@ def make_screening_pool(
         print(f"Using full X_cv for screening: {len(X_cv):,} rows")
         return X_cv.reset_index(drop=True), y_cv
 
-    if screening_rows < len(np.unique(y_cv)) * 2:
+    classes = np.unique(y_cv)
+    min_required = len(classes) * 2
+    if screening_rows < min_required:
         raise ValueError(
             "screening_rows is too small for the number of classes. "
-            f"Use at least {len(np.unique(y_cv)) * 2} rows."
+            f"Use at least {min_required} rows."
         )
 
-    all_idx = np.arange(len(y_cv))
-    sample_idx, _ = train_test_split(
-        all_idx,
-        train_size=screening_rows,
-        stratify=y_cv,
-        random_state=RANDOM_STATE,
-    )
-    sample_idx = np.sort(sample_idx)
-    X_pool = X_cv.iloc[sample_idx].reset_index(drop=True)
-    y_pool = y_cv[sample_idx]
-    print(f"Using stratified screening pool: {len(X_pool):,} rows from X_cv")
+    rng = np.random.default_rng(RANDOM_STATE)
+    selected_idx: list[int] = []
+    remaining_idx: list[int] = []
+    skipped_classes = 0
+
+    # Keep at least 2 rows per class in the screening pool so the later
+    # train/validation split can place at least 1 row in each side.
+    for label in classes:
+        class_idx = np.flatnonzero(y_cv == label)
+        rng.shuffle(class_idx)
+        if len(class_idx) < 2:
+            skipped_classes += 1
+            continue
+        selected_idx.extend(class_idx[:2].tolist())
+        remaining_idx.extend(class_idx[2:].tolist())
+
+    remaining_budget = screening_rows - len(selected_idx)
+    if remaining_budget > 0 and remaining_idx:
+        if remaining_budget >= len(remaining_idx):
+            selected_idx.extend(remaining_idx)
+        else:
+            selected_idx.extend(rng.choice(remaining_idx, size=remaining_budget, replace=False).tolist())
+
+    selected_idx = sorted(selected_idx)
+    X_pool = X_cv.iloc[selected_idx].reset_index(drop=True)
+    y_pool = y_cv[selected_idx]
+
+    pool_min_count = int(pd.Series(y_pool).value_counts().min())
+    print(f"Using class-safe screening pool: {len(X_pool):,} rows from X_cv")
+    print(f"Screening pool classes: {len(np.unique(y_pool)):,}")
+    print(f"Screening pool minimum class count: {pool_min_count}")
+    if skipped_classes:
+        print(f"[WARN] Skipped classes with fewer than 2 rows in X_cv: {skipped_classes}")
+
     return X_pool, y_pool
 
 
@@ -269,18 +294,48 @@ def make_screening_split(
     y_pool: np.ndarray,
     validation_size: float,
 ) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray, np.ndarray]:
-    idx = np.arange(len(y_pool))
-    train_idx, val_idx = train_test_split(
-        idx,
-        test_size=validation_size,
-        stratify=y_pool,
-        random_state=RANDOM_STATE,
-    )
+    rng = np.random.default_rng(RANDOM_STATE)
+    classes = np.unique(y_pool)
+    desired_val_size = int(round(len(y_pool) * validation_size))
+    desired_val_size = max(desired_val_size, len(classes))
+    desired_val_size = min(desired_val_size, len(y_pool) - len(classes))
+
+    val_idx: list[int] = []
+    extra_candidates: list[int] = []
+
+    # Put 1 row per class into validation, reserve 1 row per class for train,
+    # then use the remaining rows to fill validation to the requested size.
+    for label in classes:
+        class_idx = np.flatnonzero(y_pool == label)
+        rng.shuffle(class_idx)
+        if len(class_idx) < 2:
+            raise ValueError(
+                f"Class {label} has only {len(class_idx)} row(s) in screening pool. "
+                "Increase --screening_rows."
+            )
+        val_idx.append(int(class_idx[0]))
+        extra_candidates.extend(class_idx[2:].tolist())
+
+    extra_needed = desired_val_size - len(val_idx)
+    if extra_needed > 0 and extra_candidates:
+        extra_needed = min(extra_needed, len(extra_candidates))
+        val_idx.extend(rng.choice(extra_candidates, size=extra_needed, replace=False).tolist())
+
+    val_idx = np.array(sorted(set(val_idx)), dtype=int)
+    train_mask = np.ones(len(y_pool), dtype=bool)
+    train_mask[val_idx] = False
+    train_idx = np.flatnonzero(train_mask)
+
+    y_train_screen = y_pool[train_idx]
+    y_val_screen = y_pool[val_idx]
+    print(f"Screening split train min class count: {int(pd.Series(y_train_screen).value_counts().min())}")
+    print(f"Screening split validation min class count: {int(pd.Series(y_val_screen).value_counts().min())}")
+
     return (
         X_pool.iloc[train_idx].reset_index(drop=True),
         X_pool.iloc[val_idx].reset_index(drop=True),
-        y_pool[train_idx],
-        y_pool[val_idx],
+        y_train_screen,
+        y_val_screen,
     )
 
 
