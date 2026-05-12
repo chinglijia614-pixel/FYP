@@ -1,0 +1,256 @@
+Focused Checker Manual Selection Testing Cases
+Model: Kaggle + DDXPlus XGBoost
+Purpose: Manual symptom-selection testing using symptom descriptions adapted from reliable public medical websites.
+
+Method note:
+- The same source websites used in the LLM Chat testing set were reused here for consistency.
+- Instead of converting the website descriptions into first-person patient-style sentences, the symptom descriptions were mapped directly into canonical symptom options available in the manual selection interface.
+- The manually selected symptoms below correspond to the checkbox symptoms chosen in the focused checker mode.
+- Results below were tested against the focused checker in the prototype.
+
+================================================================================
+CASE 01
+Target disease: acute bronchitis
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/bronchitis/symptoms-causes/syc-20355566
+Source symptom wording used:
+- Cough
+- Production of mucus (sputum), which can be clear, white, yellowish-gray or green in color
+- Sore throat
+- Slight fever and chills
+- Shortness of breath and wheezing
+- Chest discomfort
+Manually selected symptoms:
+- cough
+- coughing up sputum
+- fever
+- shortness of breath
+- sore throat
+- wheezing
+Top-3 result:
+1. acute bronchitis (99.69%)
+2. croup (0.14%)
+3. pneumonia (0.03%)
+Status: Top-1 matched
+
+================================================================================
+CASE 02
+Target disease: gastroesophageal reflux disease (gerd)
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/gerd/symptoms-causes/syc-20361940
+Source symptom wording used:
+- Backwash of food or sour liquid in the throat
+- Upper belly or chest pain
+- Trouble swallowing
+- An ongoing cough
+- Hoarseness
+- Nausea
+Manually selected symptoms:
+- cough
+- hoarse voice
+- nausea
+- regurgitation
+- upper abdominal pain
+Top-3 result:
+1. gastroesophageal reflux disease (gerd) (99.49%)
+2. pharyngitis (0.25%)
+3. laryngitis (0.13%)
+Status: Top-1 matched
+
+================================================================================
+CASE 03
+Target disease: pulmonary embolism
+Source URL:
+https://www.hopkinsmedicine.org/health/conditions-and-diseases/pulmonary-embolism
+Source symptom wording used:
+- Sudden shortness of breath
+- Chest pain
+- Coughing
+- Sweating
+- Pain in the affected leg
+- Swelling in the leg
+Manually selected symptoms:
+- cough
+- leg pain
+- leg swelling
+- shortness of breath
+- sweating
+Top-3 result:
+1. pulmonary embolism (99.86%)
+2. pulmonary congestion (0.07%)
+3. croup (0.01%)
+Status: Top-1 matched
+
+================================================================================
+CASE 04
+Target disease: acute otitis media
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/ear-infections/symptoms-causes/syc-20351616
+Source symptom wording used:
+- Ear pain
+- Trouble hearing or responding to sounds
+- Fever of 100 F (38 C) or higher
+- Headache
+- Loss of balance
+Manually selected symptoms:
+- diminished hearing
+- ear pain
+- fever
+- headache
+Top-3 result:
+1. acute otitis media (93.97%)
+2. common cold (3.62%)
+3. chronic sinusitis (2.16%)
+Status: Top-1 matched
+
+================================================================================
+CASE 05
+Target disease: flu
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/flu/symptoms-causes/syc-20351719
+Source symptom wording used:
+- Fever
+- Aching muscles
+- Chills and sweats
+- Headache
+- Dry, persistent cough
+- Sore throat
+- Runny or stuffy nose
+- Feeling weak and tired
+- Vomiting and diarrhea, but this is more common in children than adults
+Manually selected symptoms:
+- chills
+- coryza
+- cough
+- feeling ill
+- fever
+- headache
+- nausea
+- sore throat
+Top-3 result:
+1. flu (99.48%)
+2. common cold (0.42%)
+3. acute bronchitis (0.04%)
+Status: Top-1 matched
+
+================================================================================
+CASE 06
+Target disease: pneumonia
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/pneumonia/symptoms-causes/syc-20354204
+Source symptom wording used:
+- Cough with phlegm or pus
+- Fever
+- Chills
+- Difficulty breathing
+- Chest pain when you breathe or cough
+- Fatigue
+Manually selected symptoms:
+- chills
+- cough
+- coughing up sputum
+- difficulty breathing
+- fatigue
+- fever
+Top-3 result:
+1. pneumonia (77.84%)
+2. asthma (14.28%)
+3. lung cancer (4.08%)
+Status: Top-1 matched
+
+================================================================================
+CASE 07
+Target disease: laryngitis
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/laryngitis/symptoms-causes/syc-20374262
+Source symptom wording used:
+- Hoarse voice
+- Dry throat
+- Dry cough
+- Trouble swallowing
+- Fever that won't go away
+Manually selected symptoms:
+- cough
+- difficulty in swallowing
+- fever
+- hoarse voice
+- sore throat
+Top-3 result:
+1. laryngitis (97.02%)
+2. pharyngitis (1.78%)
+3. flu (0.25%)
+Status: Top-1 matched
+
+================================================================================
+CASE 08
+Target disease: atrial fibrillation
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/atrial-fibrillation/symptoms-causes/syc-20350624
+Source symptom wording used:
+- A fast, fluttering or pounding heartbeat
+- Chest pain
+- Dizziness
+- Fatigue
+- Lightheadedness
+- Shortness of breath
+Manually selected symptoms:
+- dizziness
+- fatigue
+- palpitations
+- shortness of breath
+Top-3 result:
+1. atrial fibrillation (91.98%)
+2. myasthenia gravis (3.31%)
+3. paroxysmal supraventricular tachycardia (1.93%)
+Status: Top-1 matched
+
+================================================================================
+CASE 09
+Target disease: angina
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/angina/symptoms-causes/syc-20369373
+Source symptom wording used:
+- Pressure, fullness or a squeezing pain in the center of the chest
+- Nausea
+- Shortness of breath
+- Sweating
+- Dizziness
+- Fatigue
+Manually selected symptoms:
+- dizziness
+- nausea
+- shortness of breath
+- sweating
+Top-3 result:
+1. angina (57.25%)
+2. panic attack (12.45%)
+3. heart attack (7.58%)
+Status: Top-1 matched
+
+================================================================================
+CASE 10
+Target disease: asthma
+Source URL:
+https://www.mayoclinic.org/diseases-conditions/asthma/symptoms-causes/syc-20369653
+Source symptom wording used:
+- Coughing
+- A whistling sound (wheezing) when breathing out
+- Shortness of breath
+- Chest tightness or pain
+Manually selected symptoms:
+- chest tightness
+- cough
+- shortness of breath
+- wheezing
+Top-3 result:
+1. acute bronchospasm (73.35%)
+2. asthma (24.13%)
+3. pulmonary congestion (0.50%)
+Status: Top-3 related, but not Top-1 matched
+
+================================================================================
+Batch summary
+- Total cases tested: 10
+- Top-1 matched: 9
+- Top-3 related but not Top-1 matched: 1
+- Broad observation: the manual selection workflow produced strong focused-checker results when the selected canonical symptoms closely represented the source symptom descriptions.

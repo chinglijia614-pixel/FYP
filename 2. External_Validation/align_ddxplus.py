@@ -136,6 +136,8 @@ DISEASE_ALIAS_SEED = {
     "Pancreatic neoplasm": "pancreatic cancer",
     "Acute pulmonary edema": "pulmonary congestion",
     "Larygospasm": "acute bronchospasm",
+    "PSVT": "paroxysmal supraventricular tachycardia",
+    "SLE": "systemic lupus erythematosis (sle)",
 }
 
 BASE_SYMPTOM_MAP = {
